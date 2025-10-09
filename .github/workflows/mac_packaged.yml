@@ -37,7 +37,7 @@ jobs:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
 
-      # Закрепляем SDK 14
+      # Закрепляем SDK 14 (Xcode 15.2)
       - name: Select Xcode 15.2 (macOS 14 SDK)
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -47,7 +47,7 @@ jobs:
         run: |
           brew update
           brew upgrade || true
-          # гарантированно используем ffmpeg@6
+          # используем строго ffmpeg@6
           brew unlink ffmpeg || true
           brew install ada-url autoconf automake boost cmake ffmpeg@6 jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -160,12 +160,19 @@ jobs:
             echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
           fi
 
+          # Обходим захват jpeglib.h из Mono: игнорируем путь Mono и явно указываем JPEG из Homebrew
+          export CMAKE_IGNORE_PATH="/Library/Frameworks/Mono.framework/Headers"
+          export JPEG_INCLUDE_DIR="/opt/homebrew/include"
+          export JPEG_LIBRARY="/opt/homebrew/lib/libjpeg.dylib"
+
           cmake -B build -GNinja . \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_SYSROOT=${CMAKE_OSX_SYSROOT} \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET} \
             -DTDESKTOP_API_TEST=ON \
             -DCMAKE_CXX_FLAGS="-I$ABSL_SUBMODULE" \
+            -DJPEG_INCLUDE_DIR="$JPEG_INCLUDE_DIR" \
+            -DJPEG_LIBRARY="$JPEG_LIBRARY" \
             $DEFINE
           cmake --build build --parallel
 

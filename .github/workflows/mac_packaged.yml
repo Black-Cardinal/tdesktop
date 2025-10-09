@@ -39,7 +39,7 @@ on:
 jobs:
 
   macos:
-    name: MacOS
+    name: MacOS2
     runs-on: macos-latest
 
     strategy:

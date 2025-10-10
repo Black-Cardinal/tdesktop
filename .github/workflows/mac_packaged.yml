@@ -40,7 +40,7 @@ jobs:
 
   macos:
     name: MacOS
-    runs-on: macos-14
+    runs-on: macos-13
 
     strategy:
       matrix:
@@ -69,7 +69,20 @@ jobs:
         run: |
           brew update
           brew upgrade || true
-          brew install ada-url autoconf automake boost cmake ffmpeg jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
+          
+          # Устанавливаем зависимости без ada-url (он вызывает проблемы)
+          brew install autoconf automake boost cmake ffmpeg jpeg-xl libavif libheif libtool openal-soft openh264 openssl@3 opus ninja pkg-config qt yasm xz
+          
+          # Исправляем проблему с Python (если есть конфликты)
+          brew install python@3.13 || true
+          brew link --overwrite python@3.13 || true
+          
+          # Устанавливаем остальные зависимости отдельно
+          brew install cxxopts fmt expat z3 swig
+          
+          # Устанавливаем llvm отдельно с явным указанием формулы
+          brew install llvm
+          
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
           xcodebuild -version > CACHE_KEY.txt

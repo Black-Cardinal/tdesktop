@@ -103,7 +103,7 @@ jobs:
           path: ${{ env.LibrariesPath }}/tg_owt
           key: ${{ runner.os }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
 
-      - name: Build tg_owtD
+      - name: Build tg_owt (with updated Abseil PATCH D)
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
           set -e
@@ -111,42 +111,14 @@ jobs:
           git clone --depth=1 --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git"
           cd tg_owt
 
-          # Пинним Abseil на LTS с nullability (совместимо с WebRTC)
+          # ОБНОВЛЯЕМ Abseil до версии с поддержкой nullability
           git submodule update --init --recursive --force
           if [ -d src/third_party/abseil-cpp ]; then
             pushd src/third_party/abseil-cpp
             git fetch --tags || true
-            git checkout 20240116.2 || true
+            git checkout 20250201.0 || git checkout 20240116.2
             popd
           fi
-
-          # РАСШИРЕННЫЙ ПАТЧ: разворачиваем absl::Nonnull/Nullable<T> -> T во всех проблемных файлах
-          FILES=(
-            "src/api/environment/environment.h"
-            "src/api/rtc_event_log/rtc_event_log_factory_interface.h"
-            "src/modules/audio_processing/include/audio_processing.h"
-            "src/api/task_queue/pending_task_safety_flag.h"
-            "src/api/transport/field_trial_based_config.h"
-            "src/call/audio_state.h"
-            "src/call/rtp_transport_controller_send_factory_interface.h"
-          )
-          
-          for FILE in "${FILES[@]}"; do
-            if [ -f "$FILE" ]; then
-              echo "Патчим файл: $FILE"
-              /usr/bin/perl -0777 -i -pe 's/absl::\s*Nonnull\s*<\s*([^>]+)\s*>/\1/g;s/absl::\s*Nullable\s*<\s*([^>]+)\s*>/\1/g' "$FILE"
-            else
-              echo "Файл не найден: $FILE - пропускаем"
-            fi
-          done
-
-          # Дополнительно: ищем другие файлы, которые могут содержать эти аннотации
-          find . -name "*.h" -type f | xargs grep -l "absl::Nonnull\|absl::Nullable" | while read file; do
-            if [[ ! " ${FILES[@]} " =~ " ${file} " ]]; then
-              echo "Найден дополнительный файл для патча: $file"
-              /usr/bin/perl -0777 -i -pe 's/absl::\s*Nonnull\s*<\s*([^>]+)\s*>/\1/g;s/absl::\s*Nullable\s*<\s*([^>]+)\s*>/\1/g' "$file"
-            fi
-          done || true
 
           # Сборка tg_owt
           cmake -B build -GNinja . \
@@ -154,7 +126,7 @@ jobs:
             -DCMAKE_C_FLAGS_DEBUG="" \
             -DCMAKE_CXX_FLAGS_DEBUG=""
           cmake --build build --parallel
-          test -f build/libtg_owt.a    
+          test -f build/libtg_owt.a   
 
       - name: Cache tde2e
         id: cache-tde2e

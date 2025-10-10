@@ -115,13 +115,31 @@ jobs:
         if: steps.cache-webrtc-restore.outputs.cache-hit != 'true'
         run: |
           set -e
-          cd $LibrariesPath
-          git clone --depth=1 --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
+          cd "$LibrariesPath"
+
+          # если есть мусорная папка без .git — сносим
+          if [ -d tg_owt ] && [ ! -d tg_owt/.git ]; then
+            rm -rf tg_owt
+          fi
+
+          if [ -d tg_owt/.git ]; then
+            echo "Reusing existing tg_owt repo"
+            git -C tg_owt remote set-url origin "$GIT/desktop-app/tg_owt.git"
+            git -C tg_owt fetch --depth=1 origin "$OWT_REF"
+            git -C tg_owt reset --hard "$OWT_REF"
+            git -C tg_owt submodule update --init --recursive --depth=1
+          else
+            git clone --depth=1 --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git" tg_owt
+            git -C tg_owt fetch --depth=1 origin "$OWT_REF"
+            git -C tg_owt reset --hard "$OWT_REF"
+            git -C tg_owt submodule update --init --recursive --depth=1
+          fi
+
           cd tg_owt
-          git fetch --depth=1 origin "$OWT_REF"
-          git reset --hard "$OWT_REF"
 
           VENDOR_ABSL="$PWD/src/third_party/abseil-cpp"
+
+          # приоритизируем вендорный Abseil для ObjC++
           OBJC_CM="$PWD/src/sdk/objc/CMakeLists.txt"
           if ! grep -q "target_include_directories(libsdkmacos" "$OBJC_CM" 2>/dev/null; then
             cat >> "$OBJC_CM" <<EOF
@@ -147,6 +165,7 @@ jobs:
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}"
 
+          # информативная проверка (не валит сборку)
           if [ -f build/compile_commands.json ]; then
             grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
             grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json \
@@ -157,6 +176,7 @@ jobs:
           fi
 
           cmake --build build --parallel
+
 
       - name: WebRTC cache (save).
         if: steps.cache-webrtc-restore.outputs.cache-hit != 'true' && success()

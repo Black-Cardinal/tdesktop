@@ -37,7 +37,6 @@ on:
       - 'Telegram/configure.bat'
 
 jobs:
-
   macos:
     name: MacOS
     runs-on: macos-latest
@@ -69,7 +68,7 @@ jobs:
         run: |
           brew update
           brew upgrade || true
-          brew install ada-url autoconf automake boost cmake ffmpeg jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
+          brew install ada-url autoconf automake boost cmake ffmpeg@6 jpeg-xl libavif libheif libtool openal-soft openh264 openssl@3 opus ninja pkg-config python qt yasm xz
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
           xcodebuild -version > CACHE_KEY.txt
@@ -84,17 +83,16 @@ jobs:
 
           echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
 
-          curl -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
+          curl -s -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
 
       - name: RNNoise.
         run: |
           cd $LibrariesPath
-
           git clone --depth=1 https://gitlab.xiph.org/xiph/rnnoise.git
           cd rnnoise
           ./autogen.sh
           ./configure --disable-examples --disable-doc
-          make -j$(sysctl -n hw.logicalcpu)
+          make -j"$(sysctl -n hw.logicalcpu)"
           sudo make install
 
       - name: WebRTC cache.
@@ -103,20 +101,56 @@ jobs:
         with:
           path: ${{ env.LibrariesPath }}/tg_owt
           key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
-      - name: WebRTC.
+
+      - name: WebRTC (clone & patch for old Abseil).
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
-          cd $LibrariesPath
+          set -euo pipefail
+          cd "$LibrariesPath"
 
-          git clone --depth=1 --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
+          git clone --depth=1 --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git"
           cd tg_owt
 
-          cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG=""
+          # --- Вариант Б: патчим только environment.h, чтобы уйти от absl::Nonnull ---
+          python3 - <<'PY'
+import io, re, sys, pathlib
+p = pathlib.Path("src/api/environment/environment.h")
+s = p.read_text(encoding="utf-8")
+
+# Заменяем шаблонные Nonnull<T*> на старые макро-аннотации вида:
+#   absl::Nonnull<Type*> name  ->   Type* absl_nonnull name
+# Работает и для членов, и для параметров.
+def repl(m):
+    inner = m.group(1).strip()
+    name  = m.group(2)
+    return f"{inner} absl_nonnull {name}"
+
+# 1) Параметры конструктора / поля: тип внутри угловых + имя
+s = re.sub(r"absl::Nonnull\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl, s)
+
+# На всякий случай — Nullable (если вдруг встретится)
+def repl2(m):
+    inner = m.group(1).strip()
+    name  = m.group(2)
+    return f"{inner} absl_nullable {name}"
+s = re.sub(r"absl::Nullable\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl2, s)
+
+# Убедимся, что nullability.h включён (обычно уже есть).
+if '#include "absl/base/nullability.h"' not in s:
+    s = s.replace('#include "api/scoped_refptr.h"', '#include "api/scoped_refptr.h"\n#include "absl/base/nullability.h"')
+
+p.write_text(s, encoding="utf-8")
+print("Patched:", p)
+PY
+
+          # Собираем tg_owt как обычно
+          cmake -B build -GNinja . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG=""
 
           cmake --build build --parallel
+          test -f build/libtg_owt.a
 
       - name: TDE2E cache.
         id: cache-tde2e
@@ -124,23 +158,23 @@ jobs:
         with:
           path: ${{ env.LibrariesPath }}/tde2e
           key: ${{ runner.OS }}-tde2e-${{ env.CACHE_KEY }}
+
       - name: TDE2E.
         if: steps.cache-tde2e.outputs.cache-hit != 'true'
         run: |
-          cd $LibrariesPath
-
+          cd "$LibrariesPath"
           git init tde2e
           cd tde2e
-          git remote add origin $GIT/tdlib/td.git
+          git remote add origin "$GIT/tdlib/td.git"
           git fetch --depth=1 origin 51743dfd01dff6179e2d8f7095729caa4e2222e9
           git reset --hard FETCH_HEAD
 
-          cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_INSTALL_PREFIX=$PWD/build/prefix \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG="" \
-          -DTD_E2E_ONLY=ON
+          cmake -B build -GNinja . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/prefix" \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG="" \
+            -DTD_E2E_ONLY=ON
 
           cmake --build build --parallel
           cmake --install build
@@ -151,23 +185,23 @@ jobs:
           tg_owt_DIR: ${{ env.LibrariesPath }}/tg_owt/build
           tde2e_DIR: ${{ env.LibrariesPath }}/tde2e/build/prefix
         run: |
-          cd $REPO_NAME
+          cd "$REPO_NAME"
 
           DEFINE=""
           if [ -n "${{ matrix.defines }}" ]; then
             DEFINE="-D ${{ matrix.defines }}=ON"
-            echo Define from matrix: $DEFINE
+            echo "Define from matrix: $DEFINE"
             echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> $GITHUB_ENV
           else
             echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
           fi
 
-          cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG="" \
-          -DTDESKTOP_API_TEST=ON \
-          $DEFINE
+          cmake -B build -GNinja . \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG="" \
+            -DTDESKTOP_API_TEST=ON \
+            $DEFINE
 
           cmake --build build --parallel
 
@@ -182,9 +216,10 @@ jobs:
       - name: Move artifact.
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
-          cd $REPO_NAME/build
-          mkdir artifact
+          cd "$REPO_NAME/build"
+          mkdir -p artifact
           mv Telegram.dmg artifact/
+
       - uses: actions/upload-artifact@v4
         if: env.UPLOAD_ARTIFACT == 'true'
         name: Upload artifact.

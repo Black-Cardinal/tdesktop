@@ -1,194 +1,127 @@
-name: MacOS Packaged.
+name: MacOS Packaged. (repro v6.1.4 env)
 
 on:
-  push:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'changelog.txt'
-      - 'LEGAL'
-      - 'LICENSE'
-      - '.github/**'
-      - '!.github/workflows/mac_packaged.yml'
-      - 'lib/xdg/**'
-      - 'snap/**'
-      - 'Telegram/build/**'
-      - 'Telegram/Resources/uwp/**'
-      - 'Telegram/Resources/winrc/**'
-      - 'Telegram/SourceFiles/platform/win/**'
-      - 'Telegram/SourceFiles/platform/linux/**'
-      - 'Telegram/configure.bat'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - '**.md'
-      - 'changelog.txt'
-      - 'LEGAL'
-      - 'LICENSE'
-      - '.github/**'
-      - '!.github/workflows/mac_packaged.yml'
-      - 'lib/xdg/**'
-      - 'snap/**'
-      - 'Telegram/build/**'
-      - 'Telegram/Resources/uwp/**'
-      - 'Telegram/Resources/winrc/**'
-      - 'Telegram/SourceFiles/platform/win/**'
-      - 'Telegram/SourceFiles/platform/linux/**'
-      - 'Telegram/configure.bat'
+  workflow_dispatch:
 
 jobs:
-
   macos:
     name: MacOS
-    runs-on: macos-latest
-
-    strategy:
-      matrix:
-        defines:
-          - ""
+    runs-on: macos-15
+    timeout-minutes: 240
 
     env:
       GIT: "https://github.com"
+      # как у них: ffmpeg@6 + openal-soft в CMAKE_PREFIX_PATH
       CMAKE_PREFIX_PATH: "/opt/homebrew/opt/ffmpeg@6:/opt/homebrew/opt/openal-soft"
       UPLOAD_ARTIFACT: "true"
-      ONLY_CACHE: "false"
-      MANUAL_CACHING: "1"
-      AUTO_CACHING: "1"
+
+      # Путь, где собираем сторонние либы (RNNoise/tg_owt/tde2e)
+      LibrariesPath: ${{ github.workspace }}
+
+      # Зафиксированный коммит tde2e (как у них)
+      TDE2E_REF: "51743dfd01dff6179e2d8f7095729caa4e2222e9" # :contentReference[oaicite:3]{index=3}
+      # Зафиксированный tg_owt на HEAD их удачного рана
+      OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab" # :contentReference[oaicite:4]{index=4}
 
     steps:
       - name: Get repository name.
         run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
 
-      - name: Clone.
+      - name: Checkout (submodules)
         uses: actions/checkout@v5
         with:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
 
-      - name: First set up.
+      - name: First set up.  # как в их ранe
         run: |
           brew update
           brew upgrade || true
           brew install ada-url autoconf automake boost cmake ffmpeg@6 jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          # их же приём: минимальная версия macOS — из конкретной Qt 6.9.2
+          echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/6.9.2/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*\"(.*)\"\\)$/\\1/')" >> $GITHUB_ENV
+          echo "LibrariesPath=$(pwd)" >> $GITHUB_ENV
+        # brew-пакеты и Qt 6.9.2 взяты из их workflow/ранa. :contentReference[oaicite:5]{index=5}
 
-          xcodebuild -version > CACHE_KEY.txt
-          brew list --versions >> CACHE_KEY.txt
-          echo $MANUAL_CACHING >> CACHE_KEY.txt
-          echo "$GITHUB_WORKSPACE" >> CACHE_KEY.txt
-          if [ "$AUTO_CACHING" = "1" ]; then
-            thisFile=$REPO_NAME/.github/workflows/mac_packaged.yml
-            echo `md5 -q $thisFile` >> CACHE_KEY.txt
-          fi
-          echo "CACHE_KEY=`md5 -q CACHE_KEY.txt`" >> $GITHUB_ENV
-
-          echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/6.9.2/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*"(.*)"\)$/\1/')" >> $GITHUB_ENV
-          echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
-
-          curl -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
-
-      - name: RNNoise.
+      - name: Assert brew versions (как в их аннотациях)
         run: |
-          cd $LibrariesPath
+          set -e
+          brew list --versions | tee BREW_VERS.txt
+          grep -q "python@3.13 3.13.7" BREW_VERS.txt
+          grep -q "xz 5.8.1" BREW_VERS.txt
+          grep -q "pkgconf 2.5.1" BREW_VERS.txt
+          grep -q "ninja 1.13.1" BREW_VERS.txt
+          grep -q "openssl@3 3.6.0" BREW_VERS.txt
+          grep -q "cmake 4.1.2" BREW_VERS.txt
+          test -d /opt/homebrew/Cellar/qt/6.9.2
+        # Эти конкретные версии зафиксированы в UI "Annotations" их успешного рана. :contentReference[oaicite:6]{index=6}
 
+      - name: RNNoise.  # как у них
+        run: |
+          cd "$LibrariesPath"
           git clone --depth=1 https://gitlab.xiph.org/xiph/rnnoise.git
           cd rnnoise
           ./autogen.sh
           ./configure --disable-examples --disable-doc
-          make -j$(sysctl -n hw.logicalcpu)
+          make -j"$(sysctl -n hw.logicalcpu)"
           sudo make install
+        # Шаг совпадает с их RNNoise. :contentReference[oaicite:7]{index=7}
 
-      - name: WebRTC cache.
-        id: cache-webrtc
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.LibrariesPath }}/tg_owt
-          key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
-      - name: WebRTC.
-        if: steps.cache-webrtc.outputs.cache-hit != 'true'
+      - name: WebRTC (tg_owt pinned to OWT_REF)
         run: |
-          cd $LibrariesPath
-
-          git clone --depth=1 --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
+          cd "$LibrariesPath"
+          git clone --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git"
           cd tg_owt
-
+          git fetch --depth=1 origin "$OWT_REF"
+          git reset --hard "$OWT_REF"
           cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG=""
-
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG=""
           cmake --build build --parallel
+        # Их шаг WebRTC + наш пин на точный коммит вместо плавающего HEAD. :contentReference[oaicite:8]{index=8}
 
-      - name: TDE2E cache.
-        id: cache-tde2e
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.LibrariesPath }}/tde2e
-          key: ${{ runner.OS }}-tde2e-${{ env.CACHE_KEY }}
-      - name: TDE2E.
-        if: steps.cache-tde2e.outputs.cache-hit != 'true'
+      - name: TDE2E.  # как у них, с тем же SHA
         run: |
-          cd $LibrariesPath
-
+          cd "$LibrariesPath"
           git init tde2e
           cd tde2e
-          git remote add origin $GIT/tdlib/td.git
-          git fetch --depth=1 origin 51743dfd01dff6179e2d8f7095729caa4e2222e9
+          git remote add origin "$GIT/tdlib/td.git"
+          git fetch --depth=1 origin "$TDE2E_REF"
           git reset --hard FETCH_HEAD
-
           cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_INSTALL_PREFIX=$PWD/build/prefix \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG="" \
-          -DTD_E2E_ONLY=ON
-
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_INSTALL_PREFIX="$PWD/build/prefix" \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG="" \
+            -DTD_E2E_ONLY=ON
           cmake --build build --parallel
           cmake --install build
+        # Полностью совпадает с их шагом TDE2E. :contentReference[oaicite:9]{index=9}
 
-      - name: Telegram Desktop build.
-        if: env.ONLY_CACHE == 'false'
+      - name: Telegram Desktop build.  # как у них
         env:
           tg_owt_DIR: ${{ env.LibrariesPath }}/tg_owt/build
           tde2e_DIR: ${{ env.LibrariesPath }}/tde2e/build/prefix
         run: |
-          cd $REPO_NAME
-
-          DEFINE=""
-          if [ -n "${{ matrix.defines }}" ]; then
-            DEFINE="-D ${{ matrix.defines }}=ON"
-            echo Define from matrix: $DEFINE
-            echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> $GITHUB_ENV
-          else
-            echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
-          fi
-
+          cd "$REPO_NAME"
           cmake -Bbuild -GNinja . \
-          -DCMAKE_BUILD_TYPE=Debug \
-          -DCMAKE_C_FLAGS_DEBUG="" \
-          -DCMAKE_CXX_FLAGS_DEBUG="" \
-          -DTDESKTOP_API_TEST=ON \
-          $DEFINE
-
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG="" \
+            -DTDESKTOP_API_TEST=ON
           cmake --build build --parallel
-
           cd build
           macdeployqt Telegram.app
           codesign --remove-signature Telegram.app
-
           mkdir dmgsrc
           mv Telegram.app dmgsrc
           hdiutil create -volname Telegram -srcfolder dmgsrc -ov -format UDZO Telegram.dmg
+        # Конфиг, macdeployqt, DMG — дословно как у них. :contentReference[oaicite:10]{index=10}
 
-      - name: Move artifact.
-        if: env.UPLOAD_ARTIFACT == 'true'
-        run: |
-          cd $REPO_NAME/build
-          mkdir artifact
-          mv Telegram.dmg artifact/
-      - uses: actions/upload-artifact@v4
-        if: env.UPLOAD_ARTIFACT == 'true'
-        name: Upload artifact.
+      - name: Upload artifact.
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.REPO_NAME }}/build/artifact/
+          name: Telegram
+          path: ${{ env.REPO_NAME }}/build/Telegram.dmg

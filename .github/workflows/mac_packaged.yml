@@ -1,4 +1,4 @@
-name: MacOS Packaged (reliable arm64, fixed OBJCXX)
+name: MacOS Packaged.
 
 on:
   push:
@@ -42,7 +42,7 @@ on:
 jobs:
   macos:
     name: MacOS
-    runs-on: macos-15
+    runs-on: macos-latest   # как у них (ARM раннер)
     timeout-minutes: 240
 
     env:
@@ -52,20 +52,18 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
-      OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
-      TDE2E_REF: "51743dfd01dff6179e2d8f7095729caa4e2222e9"
 
     steps:
-      - name: Get repository name
+      - name: Get repository name.
         run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
 
-      - name: Checkout (with submodules)
+      - name: Clone.
         uses: actions/checkout@v5
         with:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
 
-      - name: Toolchain
+      - name: First set up.
         run: |
           brew update
           brew upgrade || true
@@ -82,85 +80,90 @@ jobs:
           fi
           echo "CACHE_KEY=`md5 -q CACHE_KEY.txt`" >> $GITHUB_ENV
 
-          QT_EXTRAS=$(ls /opt/homebrew/Cellar/qt/*/lib/cmake/Qt6/Qt6ConfigExtras.cmake 2>/dev/null | tail -n1 || true)
-          if [ -f "$QT_EXTRAS" ]; then
-            echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'QT_SUPPORTED_MIN_MACOS_VERSION' "$QT_EXTRAS" | sed -E 's/^.*\"(.*)\".*$/\1/')" >> $GITHUB_ENV
-          fi
-          echo "LibrariesPath=$(pwd)" >> $GITHUB_ENV
+          echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/*/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*\"(.*)\".*$/\1/')" >> $GITHUB_ENV
+          echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
 
-          curl -s -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master || true
-          echo "$OWT_REF" >> tg_owt-version.json
+          curl -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
 
-      # Жёстко вырубаем системный Abseil
-      - name: Safety – vendor-only Abseil
+      # --- ДОБАВЛЕНО: вырубаем системный Abseil, чтобы не перебивал вендорный ---
+      - name: Safety – remove Homebrew Abseil
         run: |
           brew unlink abseil || brew remove -f abseil || true
           unset CPLUS_INCLUDE_PATH
           unset CPATH
 
-      - name: RNNoise
+      - name: RNNoise.
         run: |
-          cd "$LibrariesPath"
+          cd $LibrariesPath
           git clone --depth=1 https://gitlab.xiph.org/xiph/rnnoise.git
           cd rnnoise
           ./autogen.sh
           ./configure --disable-examples --disable-doc
-          make -j"$(sysctl -n hw.logicalcpu)"
+          make -j$(sysctl -n hw.logicalcpu)
           sudo make install
 
-      - name: WebRTC cache
+      - name: WebRTC cache.
         id: cache-webrtc
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}/tg_owt
           key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
 
-      - name: WebRTC (tg_owt pinned; force vendor Abseil for C/C++/OBJCXX)
+      # --- МИНИ-ПАТЧ tg_owt, чтобы ObjC++ брал vendor Abseil первым ---
+      - name: WebRTC.
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
           set -e
-          cd "$LibrariesPath"
-          git clone --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
+          cd $LibrariesPath
+          git clone --depth=1 --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
           cd tg_owt
-          git fetch --depth=1 origin "$OWT_REF"
-          git reset --hard "$OWT_REF"
 
           VENDOR_ABSL="$PWD/src/third_party/abseil-cpp"
-          # Сделать его первым в поиске для всех языков компиляции
-          export CPATH="$VENDOR_ABSL${CPATH:+:$CPATH}"
-          export CPLUS_INCLUDE_PATH="$VENDOR_ABSL${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+          # 1) Закрепляем приоритет vendor Abseil для ObjC++-библиотеки (где падает RTCVideo*VP8.mm)
+          OBJC_CM="$PWD/src/sdk/objc/CMakeLists.txt"
+          if ! grep -q "target_include_directories(libsdkmacos" "$OBJC_CM" 2>/dev/null; then
+            cat >> "$OBJC_CM" <<EOF
+
+          # Inject vendor Abseil first for ObjC++
+          if (TARGET libsdkmacos)
+            target_include_directories(libsdkmacos PRIVATE "${VENDOR_ABSL}")
+          endif()
+          EOF
+          fi
+          # 2) И глобально ставим vendor Abseil раньше системных для C/C++
+          ROOT_CM="$PWD/CMakeLists.txt"
+          if ! grep -q "include_directories(BEFORE" "$ROOT_CM"; then
+            echo "include_directories(BEFORE \"${VENDOR_ABSL}\")" >> "$ROOT_CM"
+          fi
 
           cmake -Bbuild -GNinja . \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
             -DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DCMAKE_C_FLAGS="-I${VENDOR_ABSL} ${CMAKE_C_FLAGS}" \
-            -DCMAKE_CXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_CXX_FLAGS}" \
-            -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}" \
             -DCMAKE_C_FLAGS_DEBUG="" \
             -DCMAKE_CXX_FLAGS_DEBUG=""
 
-          # sanity: убедимся, что для .mm реально есть -I.../abseil-cpp
-          grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json | head -n 1 | grep -q "${VENDOR_ABSL}" || (echo "vendor Abseil not found in OBJCXX command"; exit 1)
+          # sanity: убедимся, что ObjC++ команды реально видят abseil-cpp
+          grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
+          grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json | head -n 1 | sed 's/ -/ \n-/g' | grep -q "abseil-cpp" || (echo "vendor Abseil not in OBJCXX compile command"; exit 1)
 
           cmake --build build --parallel
 
-      - name: TDE2E cache
+      - name: TDE2E cache.
         id: cache-tde2e
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}/tde2e
           key: ${{ runner.OS }}-tde2e-${{ env.CACHE_KEY }}
 
-      - name: TDE2E
+      - name: TDE2E.
         if: steps.cache-tde2e.outputs.cache-hit != 'true'
         run: |
-          cd "$LibrariesPath"
+          cd $LibrariesPath
           git init tde2e
           cd tde2e
           git remote add origin $GIT/tdlib/td.git
-          git fetch --depth=1 origin "$TDE2E_REF"
+          git fetch --depth=1 origin 51743dfd01dff6179e2d8f7095729caa4e2222e9
           git reset --hard FETCH_HEAD
 
           cmake -Bbuild -GNinja . \
@@ -172,33 +175,50 @@ jobs:
           cmake --build build --parallel
           cmake --install build
 
-      - name: Telegram Desktop build
+      - name: Telegram Desktop build.
         if: env.ONLY_CACHE == 'false'
         env:
           tg_owt_DIR: ${{ env.LibrariesPath }}/tg_owt/build
           tde2e_DIR: ${{ env.LibrariesPath }}/tde2e/build/prefix
         run: |
-          cd "$REPO_NAME"
+          cd $REPO_NAME
+
+          DEFINE=""
+          if [ -n "${{ matrix.defines }}" ]; then
+            DEFINE="-D ${{ matrix.defines }}=ON"
+            echo Define from matrix: $DEFINE
+            echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> $GITHUB_ENV
+          else
+            echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
+          fi
+
           cmake -Bbuild -GNinja . \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS_DEBUG="" \
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DTDESKTOP_API_TEST=ON \
-            -Dtg_owt_DIR="${tg_owt_DIR}" \
-            -Dtde2e_DIR="${tde2e_DIR}"
+            $DEFINE
+
           cmake --build build --parallel
 
           cd build
-          /opt/homebrew/opt/qt/bin/macdeployqt Telegram.app
-          codesign --remove-signature Telegram.app || true
+          macdeployqt Telegram.app
+          codesign --remove-signature Telegram.app
 
-          mkdir -p dmgsrc
+          mkdir dmgsrc
           mv Telegram.app dmgsrc
           hdiutil create -volname Telegram -srcfolder dmgsrc -ov -format UDZO Telegram.dmg
 
-      - name: Upload artifact
+      - name: Move artifact.
         if: env.UPLOAD_ARTIFACT == 'true'
-        uses: actions/upload-artifact@v4
+        run: |
+          cd $REPO_NAME/build
+          mkdir artifact
+          mv Telegram.dmg artifact/
+
+      - uses: actions/upload-artifact@v4
+        if: env.UPLOAD_ARTIFACT == 'true'
+        name: Upload artifact.
         with:
-          name: Telegram
-          path: ${{ env.REPO_NAME }}/build/Telegram.dmg
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.REPO_NAME }}/build/artifact/

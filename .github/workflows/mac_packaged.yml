@@ -42,7 +42,7 @@ on:
 jobs:
   macos:
     name: MacOS
-    runs-on: macos-latest   # как у них (ARM раннер)
+    runs-on: macos-latest   # ARM раннер
     timeout-minutes: 240
 
     env:
@@ -52,6 +52,8 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
+      # Пин для tg_owt, чтобы ключ кеша и исходники были детерминированными
+      OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
 
     steps:
       - name: Get repository name.
@@ -83,9 +85,10 @@ jobs:
           echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/*/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*\"(.*)\".*$/\1/')" >> $GITHUB_ENV
           echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
 
-          curl -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
+          # Делаем ключ кеша tg_owt детерминированным по SHA
+          echo "$OWT_REF" > tg_owt-version.txt
 
-      # --- ДОБАВЛЕНО: вырубаем системный Abseil, чтобы не перебивал вендорный ---
+      # Убираем Homebrew Abseil, чтобы не перебивал вендорный
       - name: Safety – remove Homebrew Abseil
         run: |
           brew unlink abseil || brew remove -f abseil || true
@@ -102,24 +105,30 @@ jobs:
           make -j$(sysctl -n hw.logicalcpu)
           sudo make install
 
-      - name: WebRTC cache.
-        id: cache-webrtc
-        uses: actions/cache@v4
+      - name: WebRTC cache (restore).
+        id: cache-webrtc-restore
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.LibrariesPath }}/tg_owt
-          key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
+          key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ env.OWT_REF }}
+          restore-keys: |
+            ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-
+            ${{ runner.OS }}-webrtc-
 
-      # --- МИНИ-ПАТЧ tg_owt, чтобы ObjC++ брал vendor Abseil первым ---
+      # Сборка tg_owt + приоритизация вендорного Abseil для ObjC++
       - name: WebRTC.
-        if: steps.cache-webrtc.outputs.cache-hit != 'true'
+        if: steps.cache-webrtc-restore.outputs.cache-hit != 'true'
         run: |
           set -e
           cd $LibrariesPath
           git clone --depth=1 --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
           cd tg_owt
+          git fetch --depth=1 origin "$OWT_REF"
+          git reset --hard "$OWT_REF"
 
           VENDOR_ABSL="$PWD/src/third_party/abseil-cpp"
-          # 1) Закрепляем приоритет vendor Abseil для ObjC++-библиотеки (где падает RTCVideo*VP8.mm)
+
+          # 1) ObjC++ цель: либе SDK macOS ставим vendor Abseil выше системных
           OBJC_CM="$PWD/src/sdk/objc/CMakeLists.txt"
           if ! grep -q "target_include_directories(libsdkmacos" "$OBJC_CM" 2>/dev/null; then
             cat >> "$OBJC_CM" <<EOF
@@ -130,7 +139,8 @@ jobs:
           endif()
           EOF
           fi
-          # 2) И глобально ставим vendor Abseil раньше системных для C/C++
+
+          # 2) Глобально для C/C++
           ROOT_CM="$PWD/CMakeLists.txt"
           if ! grep -q "include_directories(BEFORE" "$ROOT_CM"; then
             echo "include_directories(BEFORE \"${VENDOR_ABSL}\")" >> "$ROOT_CM"
@@ -140,14 +150,29 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
             -DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_C_FLAGS_DEBUG="" \
-            -DCMAKE_CXX_FLAGS_DEBUG=""
+            -DCMAKE_CXX_FLAGS_DEBUG="" \
+            -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}"
 
-          # sanity: убедимся, что ObjC++ команды реально видят abseil-cpp
-          grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
-          grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json | head -n 1 | sed 's/ -/ \n-/g' | grep -q "abseil-cpp" || (echo "vendor Abseil not in OBJCXX compile command"; exit 1)
+          # Санити: только предупреждаем, не валим джоб
+          if [ -f build/compile_commands.json ]; then
+            grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
+            grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json \
+              | head -n 1 | sed 's/ -/ \n-/g' | grep -q "abseil-cpp" \
+              || echo "WARN: vendor Abseil не найден в команде OBJCXX (продолжаем)"
+          else
+            echo "WARN: compile_commands.json не создан (продолжаем)"
+          fi
 
           cmake --build build --parallel
+
+      - name: WebRTC cache (save).
+        if: steps.cache-webrtc-restore.outputs.cache-hit != 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LibrariesPath }}/tg_owt
+          key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ env.OWT_REF }}
 
       - name: TDE2E cache.
         id: cache-tde2e

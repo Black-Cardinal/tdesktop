@@ -11,7 +11,7 @@ on:
 jobs:
   macos:
     name: MacOS2
-    runs-on: macos-13
+    runs-on: macos-14
 
     strategy:
       matrix:
@@ -19,7 +19,6 @@ jobs:
 
     env:
       GIT: "https://github.com"
-      # обязательно ffmpeg@6
       CMAKE_PREFIX_PATH: "/opt/homebrew/opt/ffmpeg@6:/opt/homebrew/opt/openal-soft"
       PKG_CONFIG_PATH: "/opt/homebrew/opt/ffmpeg@6/lib/pkgconfig"
       UPLOAD_ARTIFACT: "true"
@@ -37,7 +36,6 @@ jobs:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
 
-      # Закрепляем SDK 14 (Xcode 15.2)
       - name: Select Xcode 15.2 (macOS 14 SDK)
         uses: maxim-lobanov/setup-xcode@v1
         with:
@@ -47,12 +45,11 @@ jobs:
         run: |
           brew update
           brew upgrade || true
-          # используем строго ffmpeg@6
           brew unlink ffmpeg || true
-          brew install ada-url autoconf automake boost cmake ffmpeg@6 jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
+          # ВАЖНО: jpeg-xl УБРАН, чтобы не тащить absl*.dylib
+          brew install ada-url autoconf automake boost cmake ffmpeg@6 libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
-          # SDK 14 в окружение для всех cmake
           echo "CMAKE_OSX_SYSROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
           echo "CMAKE_OSX_DEPLOYMENT_TARGET=13.0" >> $GITHUB_ENV
 
@@ -86,7 +83,6 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}/tg_owt
-          # включаем маркер версии abseil в ключ кэша
           key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-absl-20240116_2-${{ hashFiles('**/tg_owt-version.json') }}
 
       - name: Build WebRTC (tg_owt)
@@ -97,13 +93,12 @@ jobs:
           cd tg_owt
           git submodule update --init --recursive --force
 
-          # Пин Abseil на LTS с absl::Nonnull
+          # Abseil LTS с absl::Nonnull
           cd src/third_party/abseil-cpp
           git fetch --tags
           git checkout 20240116.2
           cd ../../..
 
-          # Приоритет include сабмодуля abseil выше системных
           ABSL_SUBMODULE="$PWD/src/third_party/abseil-cpp"
           export CPATH="$ABSL_SUBMODULE:$CPATH"
 
@@ -148,7 +143,6 @@ jobs:
         run: |
           cd "$REPO_NAME"
 
-          # Тот же abseil для приоритета include
           ABSL_SUBMODULE="$LibrariesPath/tg_owt/src/third_party/abseil-cpp"
           export CPATH="$ABSL_SUBMODULE:$CPATH"
 
@@ -160,8 +154,12 @@ jobs:
             echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
           fi
 
-          # Обходим захват jpeglib.h из Mono: игнорируем путь Mono и явно указываем JPEG из Homebrew
+          # не даём CMake увидеть Mono jpeglib.h
           export CMAKE_IGNORE_PATH="/Library/Frameworks/Mono.framework/Headers"
+          # и просим НЕ искать JPEG XL во всём проекте
+          EXTRA_FIND_OFF="-DCMAKE_DISABLE_FIND_PACKAGE_JPEGXL=ON"
+
+          # на всякий случай фиксируем JPEG из Homebrew
           export JPEG_INCLUDE_DIR="/opt/homebrew/include"
           export JPEG_LIBRARY="/opt/homebrew/lib/libjpeg.dylib"
 
@@ -173,6 +171,7 @@ jobs:
             -DCMAKE_CXX_FLAGS="-I$ABSL_SUBMODULE" \
             -DJPEG_INCLUDE_DIR="$JPEG_INCLUDE_DIR" \
             -DJPEG_LIBRARY="$JPEG_LIBRARY" \
+            ${EXTRA_FIND_OFF} \
             $DEFINE
           cmake --build build --parallel
 

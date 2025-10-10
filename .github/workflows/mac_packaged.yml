@@ -113,35 +113,35 @@ jobs:
 
           # --- Вариант Б: патчим только environment.h, чтобы уйти от absl::Nonnull ---
           python3 - <<'PY'
-import io, re, sys, pathlib
-p = pathlib.Path("src/api/environment/environment.h")
-s = p.read_text(encoding="utf-8")
-
-# Заменяем шаблонные Nonnull<T*> на старые макро-аннотации вида:
-#   absl::Nonnull<Type*> name  ->   Type* absl_nonnull name
-# Работает и для членов, и для параметров.
-def repl(m):
-    inner = m.group(1).strip()
-    name  = m.group(2)
-    return f"{inner} absl_nonnull {name}"
-
-# 1) Параметры конструктора / поля: тип внутри угловых + имя
-s = re.sub(r"absl::Nonnull\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl, s)
-
-# На всякий случай — Nullable (если вдруг встретится)
-def repl2(m):
-    inner = m.group(1).strip()
-    name  = m.group(2)
-    return f"{inner} absl_nullable {name}"
-s = re.sub(r"absl::Nullable\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl2, s)
-
-# Убедимся, что nullability.h включён (обычно уже есть).
-if '#include "absl/base/nullability.h"' not in s:
-    s = s.replace('#include "api/scoped_refptr.h"', '#include "api/scoped_refptr.h"\n#include "absl/base/nullability.h"')
-
-p.write_text(s, encoding="utf-8")
-print("Patched:", p)
-PY
+          import io, re, sys, pathlib
+          p = pathlib.Path("src/api/environment/environment.h")
+          s = p.read_text(encoding="utf-8")
+          
+          # Заменяем шаблонные Nonnull<T*> на старые макро-аннотации вида:
+          #   absl::Nonnull<Type*> name  ->   Type* absl_nonnull name
+          # Работает и для членов, и для параметров.
+          def repl(m):
+              inner = m.group(1).strip()
+              name  = m.group(2)
+              return f"{inner} absl_nonnull {name}"
+          
+          # 1) Параметры конструктора / поля: тип внутри угловых + имя
+          s = re.sub(r"absl::Nonnull\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl, s)
+          
+          # На всякий случай — Nullable (если вдруг встретится)
+          def repl2(m):
+              inner = m.group(1).strip()
+              name  = m.group(2)
+              return f"{inner} absl_nullable {name}"
+          s = re.sub(r"absl::Nullable\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl2, s)
+          
+          # Убедимся, что nullability.h включён (обычно уже есть).
+          if '#include "absl/base/nullability.h"' not in s:
+              s = s.replace('#include "api/scoped_refptr.h"', '#include "api/scoped_refptr.h"\n#include "absl/base/nullability.h"')
+          
+          p.write_text(s, encoding="utf-8")
+          print("Patched:", p)
+          PY
 
           # Собираем tg_owt как обычно
           cmake -B build -GNinja . \

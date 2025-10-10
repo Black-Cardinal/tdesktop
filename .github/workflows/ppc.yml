@@ -1,0 +1,64 @@
+name: macOS Xcode build (guide + pin tg_owt)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install base toolchain (as in guide)
+        run: |
+          /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          brew install git automake cmake wget pkg-config gnu-tar ninja nasm meson
+
+      - name: Select full Xcode (as in guide)
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Prepare libraries (as in guide)
+        run: ./Telegram/build/prepare/mac.sh
+
+      # Пин tg_owt на рабочий коммит из их успешного прогона (06 Oct 2025)
+      - name: Pin tg_owt to known-good commit and rebuild
+        run: |
+          set -e
+          # найти каталог tg_owt, который собрал prepare (обычно в Libraries/)
+          OWT_DIR=$(find "$GITHUB_WORKSPACE" -type d -name tg_owt -maxdepth 4 | head -n1)
+          [ -n "$OWT_DIR" ] || { echo "tg_owt not found after prepare"; exit 1; }
+          echo "tg_owt at: $OWT_DIR"
+
+          git -C "$OWT_DIR" fetch --depth=1 origin 5c5c71258777d0196dbb3a09cc37d2f56ead28ab
+          git -C "$OWT_DIR" reset --hard 5c5c71258777d0196dbb3a09cc37d2f56ead28ab
+
+          # пересобрать tg_owt in-place
+          cmake -S "$OWT_DIR" -B "$OWT_DIR/build" -GNinja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$OWT_DIR/build" --parallel
+          git -C "$OWT_DIR" rev-parse HEAD
+
+      - name: Configure Xcode project (as in guide, no API keys)
+        working-directory: Telegram
+        run: ./configure.sh
+
+      - name: Build with xcodebuild (Release)
+        run: |
+          PROJ="$GITHUB_WORKSPACE/out/Telegram.xcodeproj"
+          xcodebuild \
+            -project "$PROJ" \
+            -scheme Telegram \
+            -configuration Release \
+            -derivedDataPath "$GITHUB_WORKSPACE/derived_data" \
+            build
+
+      - name: Upload Telegram.app (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram.app-Release
+          path: derived_data/Build/Products/Release/Telegram.app

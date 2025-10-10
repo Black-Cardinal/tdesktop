@@ -1,4 +1,4 @@
-name: MacOS Packaged.
+name: MacOS Packaged
 
 on:
   push:
@@ -38,14 +38,12 @@ on:
 
 jobs:
   macos:
-    name: MacOS
+    name: macOS
     runs-on: macos-latest
 
     strategy:
       matrix:
-        defines:
-          - ""
-
+        defines: [""]
     env:
       GIT: "https://github.com"
       CMAKE_PREFIX_PATH: "/opt/homebrew/opt/ffmpeg@6:/opt/homebrew/opt/openal-soft"
@@ -55,39 +53,41 @@ jobs:
       AUTO_CACHING: "1"
 
     steps:
-      - name: Get repository name.
-        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+      - name: Get repository name
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> "$GITHUB_ENV"
 
-      - name: Clone.
+      - name: Checkout
         uses: actions/checkout@v5
         with:
           submodules: recursive
           path: ${{ env.REPO_NAME }}
 
-      - name: First set up.
+      - name: First set up
         run: |
+          set -e
           brew update
           brew upgrade || true
-          brew install ada-url autoconf automake boost cmake ffmpeg@6 jpeg-xl libavif libheif libtool openal-soft openh264 openssl@3 opus ninja pkg-config python qt yasm xz
+          brew install ada-url autoconf automake boost cmake ffmpeg jpeg-xl libavif libheif libtool openal-soft openh264 openssl opus ninja pkg-config python qt yasm xz
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
 
           xcodebuild -version > CACHE_KEY.txt
           brew list --versions >> CACHE_KEY.txt
-          echo $MANUAL_CACHING >> CACHE_KEY.txt
+          echo "$MANUAL_CACHING" >> CACHE_KEY.txt
           echo "$GITHUB_WORKSPACE" >> CACHE_KEY.txt
           if [ "$AUTO_CACHING" = "1" ]; then
-            thisFile=$REPO_NAME/.github/workflows/mac_packaged.yml
-            echo `md5 -q $thisFile` >> CACHE_KEY.txt
+            thisFile="$REPO_NAME/.github/workflows/mac_packaged.yml"
+            md5 -q "$thisFile" >> CACHE_KEY.txt
           fi
-          echo "CACHE_KEY=`md5 -q CACHE_KEY.txt`" >> $GITHUB_ENV
+          echo "CACHE_KEY=$(md5 -q CACHE_KEY.txt)" >> "$GITHUB_ENV"
 
-          echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
+          echo "LibrariesPath=$(pwd)" >> "$GITHUB_ENV"
 
           curl -s -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master
 
-      - name: RNNoise.
+      - name: RNNoise
         run: |
-          cd $LibrariesPath
+          set -e
+          cd "$LibrariesPath"
           git clone --depth=1 https://gitlab.xiph.org/xiph/rnnoise.git
           cd rnnoise
           ./autogen.sh
@@ -95,73 +95,54 @@ jobs:
           make -j"$(sysctl -n hw.logicalcpu)"
           sudo make install
 
-      - name: WebRTC cache.
+      - name: Cache tg_owt
         id: cache-webrtc
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}/tg_owt
-          key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
+          key: ${{ runner.os }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
 
-      - name: WebRTC (clone & patch for old Abseil).
+      - name: Build tg_owt (with Variant B patch)
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
-          set -euo pipefail
+          set -e
           cd "$LibrariesPath"
-
           git clone --depth=1 --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git"
           cd tg_owt
 
-          # --- Вариант Б: патчим только environment.h, чтобы уйти от absl::Nonnull ---
-          python3 - <<'PY'
-          import io, re, sys, pathlib
-          p = pathlib.Path("src/api/environment/environment.h")
-          s = p.read_text(encoding="utf-8")
-          
-          # Заменяем шаблонные Nonnull<T*> на старые макро-аннотации вида:
-          #   absl::Nonnull<Type*> name  ->   Type* absl_nonnull name
-          # Работает и для членов, и для параметров.
-          def repl(m):
-              inner = m.group(1).strip()
-              name  = m.group(2)
-              return f"{inner} absl_nonnull {name}"
-          
-          # 1) Параметры конструктора / поля: тип внутри угловых + имя
-          s = re.sub(r"absl::Nonnull\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl, s)
-          
-          # На всякий случай — Nullable (если вдруг встретится)
-          def repl2(m):
-              inner = m.group(1).strip()
-              name  = m.group(2)
-              return f"{inner} absl_nullable {name}"
-          s = re.sub(r"absl::Nullable\s*<\s*([^>]+?)\s*>\s*([A-Za-z_]\w*)", repl2, s)
-          
-          # Убедимся, что nullability.h включён (обычно уже есть).
-          if '#include "absl/base/nullability.h"' not in s:
-              s = s.replace('#include "api/scoped_refptr.h"', '#include "api/scoped_refptr.h"\n#include "absl/base/nullability.h"')
-          
-          p.write_text(s, encoding="utf-8")
-          print("Patched:", p)
-          PY
+          # Пинним Abseil на LTS с nullability (совместимо с WebRTC)
+          git submodule update --init --recursive --force
+          if [ -d src/third_party/abseil-cpp ]; then
+            pushd src/third_party/abseil-cpp
+            git fetch --tags || true
+            git checkout 20240116.2 || true
+            popd
+          fi
 
-          # Собираем tg_owt как обычно
+          # ВАРИАНТ B: разворачиваем absl::Nonnull/Nullable<T> -> T в environment.h
+          FILE="src/api/environment/environment.h"
+          test -f "$FILE"
+          /usr/bin/perl -0777 -i -pe 's/absl::\s*Nonnull\s*<\s*([^>]+)\s*>/\1/g;s/absl::\s*Nullable\s*<\s*([^>]+)\s*>/\1/g' "$FILE"
+
+          # Сборка tg_owt
           cmake -B build -GNinja . \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS_DEBUG="" \
             -DCMAKE_CXX_FLAGS_DEBUG=""
-
           cmake --build build --parallel
           test -f build/libtg_owt.a
 
-      - name: TDE2E cache.
+      - name: Cache tde2e
         id: cache-tde2e
         uses: actions/cache@v4
         with:
           path: ${{ env.LibrariesPath }}/tde2e
-          key: ${{ runner.OS }}-tde2e-${{ env.CACHE_KEY }}
+          key: ${{ runner.os }}-tde2e-${{ env.CACHE_KEY }}
 
-      - name: TDE2E.
+      - name: Build tde2e
         if: steps.cache-tde2e.outputs.cache-hit != 'true'
         run: |
+          set -e
           cd "$LibrariesPath"
           git init tde2e
           cd tde2e
@@ -175,25 +156,27 @@ jobs:
             -DCMAKE_C_FLAGS_DEBUG="" \
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DTD_E2E_ONLY=ON
-
           cmake --build build --parallel
           cmake --install build
 
-      - name: Telegram Desktop build.
+      - name: Build Telegram Desktop
         if: env.ONLY_CACHE == 'false'
         env:
           tg_owt_DIR: ${{ env.LibrariesPath }}/tg_owt/build
           tde2e_DIR: ${{ env.LibrariesPath }}/tde2e/build/prefix
         run: |
+          set -e
           cd "$REPO_NAME"
 
-          DEFINE=""
+          # Приоритет include для того же Abseil, что и в tg_owt (убирает undefined symbols)
+          export CPATH="$LibrariesPath/tg_owt/src/third_party/abseil-cpp:$CPATH"
+
           if [ -n "${{ matrix.defines }}" ]; then
             DEFINE="-D ${{ matrix.defines }}=ON"
-            echo "Define from matrix: $DEFINE"
-            echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> $GITHUB_ENV
+            echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> "$GITHUB_ENV"
           else
-            echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
+            DEFINE=""
+            echo "ARTIFACT_NAME=Telegram" >> "$GITHUB_ENV"
           fi
 
           cmake -B build -GNinja . \
@@ -202,27 +185,27 @@ jobs:
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DTDESKTOP_API_TEST=ON \
             $DEFINE
-
           cmake --build build --parallel
 
           cd build
-          macdeployqt Telegram.app
+          /opt/homebrew/opt/qt/bin/macdeployqt Telegram.app -verbose=2 -always-overwrite
           codesign --remove-signature Telegram.app
 
-          mkdir dmgsrc
+          mkdir -p dmgsrc
           mv Telegram.app dmgsrc
           hdiutil create -volname Telegram -srcfolder dmgsrc -ov -format UDZO Telegram.dmg
 
-      - name: Move artifact.
+      - name: Move artifact
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
+          set -e
           cd "$REPO_NAME/build"
           mkdir -p artifact
           mv Telegram.dmg artifact/
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifact
         if: env.UPLOAD_ARTIFACT == 'true'
-        name: Upload artifact.
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: ${{ env.REPO_NAME }}/build/artifact/

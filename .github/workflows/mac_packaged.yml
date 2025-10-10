@@ -42,7 +42,7 @@ on:
 jobs:
   macos:
     name: MacOS
-    runs-on: macos-latest   # ARM
+    runs-on: macos-latest
     timeout-minutes: 240
 
     env:
@@ -52,7 +52,6 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
-      # Пин для tg_owt
       OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
 
     steps:
@@ -84,11 +83,8 @@ jobs:
 
           echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/*/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*\"(.*)\".*$/\1/')" >> $GITHUB_ENV
           echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
-
-          # Делаем ключ кеша tg_owt детерминированным по SHA
           echo "$OWT_REF" > tg_owt-version.txt
 
-      # Убираем Homebrew Abseil, чтобы не перебивал вендорный
       - name: Safety – remove Homebrew Abseil
         run: |
           brew unlink abseil || brew remove -f abseil || true
@@ -115,7 +111,6 @@ jobs:
             ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-
             ${{ runner.OS }}-webrtc-
 
-      # Сборка tg_owt + приоритизация вендорного Abseil для ObjC++
       - name: WebRTC.
         if: steps.cache-webrtc-restore.outputs.cache-hit != 'true'
         run: |
@@ -127,8 +122,6 @@ jobs:
           git reset --hard "$OWT_REF"
 
           VENDOR_ABSL="$PWD/src/third_party/abseil-cpp"
-
-          # 1) ObjC++ цель: либе SDK macOS ставим vendor Abseil выше системных
           OBJC_CM="$PWD/src/sdk/objc/CMakeLists.txt"
           if ! grep -q "target_include_directories(libsdkmacos" "$OBJC_CM" 2>/dev/null; then
             cat >> "$OBJC_CM" <<EOF
@@ -140,7 +133,6 @@ jobs:
           EOF
           fi
 
-          # 2) Глобально для C/C++
           ROOT_CM="$PWD/CMakeLists.txt"
           if ! grep -q "include_directories(BEFORE" "$ROOT_CM"; then
             echo "include_directories(BEFORE \"${VENDOR_ABSL}\")" >> "$ROOT_CM"
@@ -155,7 +147,6 @@ jobs:
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}"
 
-          # Информативная проверка
           if [ -f build/compile_commands.json ]; then
             grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
             grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json \
@@ -211,7 +202,6 @@ jobs:
           DEFINE=""
           if [ -n "${{ matrix.defines }}" ]; then
             DEFINE="-D ${{ matrix.defines }}=ON"
-            echo Define from matrix: $DEFINE
             echo "ARTIFACT_NAME=Telegram_${{ matrix.defines }}" >> $GITHUB_ENV
           else
             echo "ARTIFACT_NAME=Telegram" >> $GITHUB_ENV
@@ -228,29 +218,44 @@ jobs:
 
           cd build
 
-          # Готовим рантайм-пути и явно разворачиваем Qt фреймворки/плагины внутрь .app
+          # 0) Пути до Qt (без readlink -f, чтобы не ломаться на BSD readlink)
+          QT_BIN="/opt/homebrew/opt/qt/bin"
+          QT_PREFIX="$(ls -d /opt/homebrew/Cellar/qt/* | tail -n1)"
+
+          # 1) Добавим rpath внутрь бандла
           install_name_tool -add_rpath "@executable_path/../Frameworks" Telegram.app/Contents/MacOS/Telegram || true
 
-          QT_BIN="/opt/homebrew/opt/qt/bin"
-          QT_PREFIX="/opt/homebrew/Cellar/qt/6.9.2"
-          if [ ! -x "$QT_BIN/macdeployqt" ]; then
-            QT_BIN="$(/usr/bin/dirname "$(readlink -f /opt/homebrew/opt/qt)")/bin"
-          fi
-          if [ ! -d "$QT_PREFIX" ]; then
-            QT_PREFIX="$(/usr/bin/dirname "$(readlink -f /opt/homebrew/opt/qt)")"
-          fi
+          # 2) Предскопируем Qt-фреймворки, чтобы macdeployqt легко их нашёл
+          mkdir -p Telegram.app/Contents/Frameworks
+          rsync -a "$QT_PREFIX/lib/Qt"*.framework "Telegram.app/Contents/Frameworks/" || true
 
+          # 3) Создадим qt.conf, чтобы рантайм искал всё внутри бандла
+          mkdir -p Telegram.app/Contents/Resources
+          cat > Telegram.app/Contents/Resources/qt.conf <<'CONF'
+          [Paths]
+          Prefix=..
+          Plugins=PlugIns
+          Qml2Imports=Resources/qml
+          Imports=Resources/qml
+          Translations=Resources/translations
+          Libraries=Frameworks
+          CONF
+
+          # 4) Разворачиваем Qt внутрь .app с расширенными путями поиска
+          export DYLD_FRAMEWORK_PATH="$QT_PREFIX/lib:$(pwd)/Telegram.app/Contents/Frameworks"
+          export DYLD_LIBRARY_PATH="$DYLD_FRAMEWORK_PATH"
           "$QT_BIN/macdeployqt" Telegram.app \
             -verbose=3 \
             -always-overwrite \
             -libpath="$QT_PREFIX/lib" \
+            -libpath="$(pwd)/Telegram.app/Contents/Frameworks" \
             -plugindir="$QT_PREFIX/plugins" \
             -qmldir="$QT_PREFIX/qml"
 
           echo "== Linked Qt frameworks in executable =="
           otool -L Telegram.app/Contents/MacOS/Telegram | grep Qt || true
           echo "== Deployed frameworks =="
-          ls -1 Telegram.app/Contents/Frameworks | head -n 100 || true
+          ls -1 Telegram.app/Contents/Frameworks | head -n 200 || true
 
           codesign --remove-signature Telegram.app || true
 

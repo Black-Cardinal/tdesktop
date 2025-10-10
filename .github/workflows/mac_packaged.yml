@@ -54,7 +54,7 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
-      # Пин на рабочий HEAD tg_owt из успешного прогона v6.1.4
+      # Пин рабочего HEAD tg_owt (из их успешного прогона v6.1.4)
       OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
 
     steps:
@@ -84,7 +84,7 @@ jobs:
           fi
           echo "CACHE_KEY=`md5 -q CACHE_KEY.txt`" >> $GITHUB_ENV
 
-          # как в их удачном прогоне: берем минимальную версию macOS из Qt 6.9.2
+          # как в их удачном прогоне: берём минимальную версию macOS из Qt 6.9.2
           echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'set(QT_SUPPORTED_MIN_MACOS_VERSION' /opt/homebrew/Cellar/qt/6.9.2/lib/cmake/Qt6/Qt6ConfigExtras.cmake | sed -E 's/^.*\"(.*)\"\\)$/\\1/')" >> $GITHUB_ENV
           echo "LibrariesPath=`pwd`" >> $GITHUB_ENV
 
@@ -95,6 +95,7 @@ jobs:
       - name: RNNoise.
         run: |
           cd $LibrariesPath
+
           git clone --depth=1 https://gitlab.xiph.org/xiph/rnnoise.git
           cd rnnoise
           ./autogen.sh
@@ -113,15 +114,17 @@ jobs:
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
           cd $LibrariesPath
+
           git clone --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
           cd tg_owt
           git fetch --depth=1 origin "$OWT_REF"
           git reset --hard "$OWT_REF"
 
           cmake -Bbuild -GNinja . \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS_DEBUG="" \
-            -DCMAKE_CXX_FLAGS_DEBUG=""
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS_DEBUG="" \
+          -DCMAKE_CXX_FLAGS_DEBUG=""
+
           cmake --build build --parallel
 
       - name: TDE2E cache.
@@ -135,6 +138,7 @@ jobs:
         if: steps.cache-tde2e.outputs.cache-hit != 'true'
         run: |
           cd $LibrariesPath
+
           git init tde2e
           cd tde2e
           git remote add origin $GIT/tdlib/td.git
@@ -142,11 +146,12 @@ jobs:
           git reset --hard FETCH_HEAD
 
           cmake -Bbuild -GNinja . \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_INSTALL_PREFIX=$PWD/build/prefix \
-            -DCMAKE_C_FLAGS_DEBUG="" \
-            -DCMAKE_CXX_FLAGS_DEBUG="" \
-            -DTD_E2E_ONLY=ON
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_INSTALL_PREFIX=$PWD/build/prefix \
+          -DCMAKE_C_FLAGS_DEBUG="" \
+          -DCMAKE_CXX_FLAGS_DEBUG="" \
+          -DTD_E2E_ONLY=ON
+
           cmake --build build --parallel
           cmake --install build
 
@@ -168,11 +173,11 @@ jobs:
           fi
 
           cmake -Bbuild -GNinja . \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_C_FLAGS_DEBUG="" \
-            -DCMAKE_CXX_FLAGS_DEBUG="" \
-            -DTDESKTOP_API_TEST=ON \
-            $DEFINE
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS_DEBUG="" \
+          -DCMAKE_CXX_FLAGS_DEBUG="" \
+          -DTDESKTOP_API_TEST=ON \
+          $DEFINE
 
           cmake --build build --parallel
 
@@ -190,7 +195,6 @@ jobs:
           cd $REPO_NAME/build
           mkdir artifact
           mv Telegram.dmg artifact/
-
       - uses: actions/upload-artifact@v4
         if: env.UPLOAD_ARTIFACT == 'true'
         name: Upload artifact.

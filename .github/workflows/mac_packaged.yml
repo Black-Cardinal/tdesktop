@@ -1,4 +1,4 @@
-name: MacOS Packaged (reliable arm64)
+name: MacOS Packaged (reliable arm64, fixed OBJCXX)
 
 on:
   push:
@@ -52,7 +52,6 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
-      # Рабочие пины из зелёного прогона
       OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
       TDE2E_REF: "51743dfd01dff6179e2d8f7095729caa4e2222e9"
 
@@ -83,18 +82,16 @@ jobs:
           fi
           echo "CACHE_KEY=`md5 -q CACHE_KEY.txt`" >> $GITHUB_ENV
 
-          # MACOSX_DEPLOYMENT_TARGET из Qt (авто-поиск версии)
           QT_EXTRAS=$(ls /opt/homebrew/Cellar/qt/*/lib/cmake/Qt6/Qt6ConfigExtras.cmake 2>/dev/null | tail -n1 || true)
           if [ -f "$QT_EXTRAS" ]; then
             echo "MACOSX_DEPLOYMENT_TARGET=$(grep 'QT_SUPPORTED_MIN_MACOS_VERSION' "$QT_EXTRAS" | sed -E 's/^.*\"(.*)\".*$/\1/')" >> $GITHUB_ENV
           fi
           echo "LibrariesPath=$(pwd)" >> $GITHUB_ENV
 
-          # для ключа кэша tg_owt
           curl -s -o tg_owt-version.json https://api.github.com/repos/desktop-app/tg_owt/git/refs/heads/master || true
           echo "$OWT_REF" >> tg_owt-version.json
 
-      # НАДЁЖНЫЙ ФИКС: используем ТОЛЬКО вендорный Abseil (убираем системный)
+      # Жёстко вырубаем системный Abseil
       - name: Safety – vendor-only Abseil
         run: |
           brew unlink abseil || brew remove -f abseil || true
@@ -118,20 +115,35 @@ jobs:
           path: ${{ env.LibrariesPath }}/tg_owt
           key: ${{ runner.OS }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
 
-      - name: WebRTC (tg_owt pinned)
+      - name: WebRTC (tg_owt pinned; force vendor Abseil for C/C++/OBJCXX)
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
+          set -e
           cd "$LibrariesPath"
           git clone --recursive --shallow-submodules $GIT/desktop-app/tg_owt.git
           cd tg_owt
           git fetch --depth=1 origin "$OWT_REF"
           git reset --hard "$OWT_REF"
 
+          VENDOR_ABSL="$PWD/src/third_party/abseil-cpp"
+          # Сделать его первым в поиске для всех языков компиляции
+          export CPATH="$VENDOR_ABSL${CPATH:+:$CPATH}"
+          export CPLUS_INCLUDE_PATH="$VENDOR_ABSL${CPLUS_INCLUDE_PATH:+:$CPLUS_INCLUDE_PATH}"
+
           cmake -Bbuild -GNinja . \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_NO_SYSTEM_FROM_IMPORTED=ON \
             -DCMAKE_INCLUDE_DIRECTORIES_BEFORE=ON \
-            -DCMAKE_CXX_FLAGS="$CMAKE_CXX_FLAGS -I$PWD/src/third_party/abseil-cpp"
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_FLAGS="-I${VENDOR_ABSL} ${CMAKE_C_FLAGS}" \
+            -DCMAKE_CXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_CXX_FLAGS}" \
+            -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}" \
+            -DCMAKE_C_FLAGS_DEBUG="" \
+            -DCMAKE_CXX_FLAGS_DEBUG=""
+
+          # sanity: убедимся, что для .mm реально есть -I.../abseil-cpp
+          grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json | head -n 1 | grep -q "${VENDOR_ABSL}" || (echo "vendor Abseil not found in OBJCXX command"; exit 1)
+
           cmake --build build --parallel
 
       - name: TDE2E cache
@@ -167,7 +179,6 @@ jobs:
           tde2e_DIR: ${{ env.LibrariesPath }}/tde2e/build/prefix
         run: |
           cd "$REPO_NAME"
-
           cmake -Bbuild -GNinja . \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_FLAGS_DEBUG="" \

@@ -42,7 +42,7 @@ on:
 jobs:
   macos:
     name: MacOS
-    runs-on: macos-latest   # ARM раннер
+    runs-on: macos-latest   # ARM
     timeout-minutes: 240
 
     env:
@@ -52,7 +52,7 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "1"
       AUTO_CACHING: "1"
-      # Пин для tg_owt, чтобы ключ кеша и исходники были детерминированными
+      # Пин для tg_owt
       OWT_REF: "5c5c71258777d0196dbb3a09cc37d2f56ead28ab"
 
     steps:
@@ -155,7 +155,7 @@ jobs:
             -DCMAKE_CXX_FLAGS_DEBUG="" \
             -DCMAKE_OBJCXX_FLAGS="-I${VENDOR_ABSL} ${CMAKE_OBJCXX_FLAGS}"
 
-          # Санити: только предупреждаем, не валим джоб
+          # Информативная проверка
           if [ -f build/compile_commands.json ]; then
             grep -E '"file":.*RTCVideo(Encoder|Decoder)VP8\.mm' -n build/compile_commands.json -A1 | head -n 10 || true
             grep -E '"command".*RTCVideo(Encoder|Decoder)VP8\.mm' build/compile_commands.json \
@@ -227,10 +227,34 @@ jobs:
           cmake --build build --parallel
 
           cd build
-          macdeployqt Telegram.app
-          codesign --remove-signature Telegram.app
 
-          mkdir dmgsrc
+          # Готовим рантайм-пути и явно разворачиваем Qt фреймворки/плагины внутрь .app
+          install_name_tool -add_rpath "@executable_path/../Frameworks" Telegram.app/Contents/MacOS/Telegram || true
+
+          QT_BIN="/opt/homebrew/opt/qt/bin"
+          QT_PREFIX="/opt/homebrew/Cellar/qt/6.9.2"
+          if [ ! -x "$QT_BIN/macdeployqt" ]; then
+            QT_BIN="$(/usr/bin/dirname "$(readlink -f /opt/homebrew/opt/qt)")/bin"
+          fi
+          if [ ! -d "$QT_PREFIX" ]; then
+            QT_PREFIX="$(/usr/bin/dirname "$(readlink -f /opt/homebrew/opt/qt)")"
+          fi
+
+          "$QT_BIN/macdeployqt" Telegram.app \
+            -verbose=3 \
+            -always-overwrite \
+            -libpath="$QT_PREFIX/lib" \
+            -plugindir="$QT_PREFIX/plugins" \
+            -qmldir="$QT_PREFIX/qml"
+
+          echo "== Linked Qt frameworks in executable =="
+          otool -L Telegram.app/Contents/MacOS/Telegram | grep Qt || true
+          echo "== Deployed frameworks =="
+          ls -1 Telegram.app/Contents/Frameworks | head -n 100 || true
+
+          codesign --remove-signature Telegram.app || true
+
+          mkdir -p dmgsrc
           mv Telegram.app dmgsrc
           hdiutil create -volname Telegram -srcfolder dmgsrc -ov -format UDZO Telegram.dmg
 
@@ -238,7 +262,7 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           cd $REPO_NAME/build
-          mkdir artifact
+          mkdir -p artifact
           mv Telegram.dmg artifact/
 
       - uses: actions/upload-artifact@v4

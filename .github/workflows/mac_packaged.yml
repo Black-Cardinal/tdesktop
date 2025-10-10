@@ -103,7 +103,7 @@ jobs:
           path: ${{ env.LibrariesPath }}/tg_owt
           key: ${{ runner.os }}-webrtc-${{ env.CACHE_KEY }}-${{ hashFiles('**/tg_owt-version.json') }}
 
-      - name: Build tg_owt (with updated Abseil PATCH D)
+      - name: Build tg_owt (complete nullability fix)D
         if: steps.cache-webrtc.outputs.cache-hit != 'true'
         run: |
           set -e
@@ -111,14 +111,49 @@ jobs:
           git clone --depth=1 --recursive --shallow-submodules "$GIT/desktop-app/tg_owt.git"
           cd tg_owt
 
-          # ОБНОВЛЯЕМ Abseil до версии с поддержкой nullability
+          # Пинним Abseil на LTS с nullability (совместимо с WebRTC)
           git submodule update --init --recursive --force
           if [ -d src/third_party/abseil-cpp ]; then
             pushd src/third_party/abseil-cpp
             git fetch --tags || true
-            git checkout 20250201.0 || git checkout 20240116.2
+            git checkout 20240116.2 || true
             popd
           fi
+
+          # ПОЛНЫЙ ПАТЧ: обрабатываем ВСЕ файлы с absl::Nonnull/Nullable
+          echo "Применяем патч для absl::Nonnull/Nullable..."
+          
+          # Список основных файлов для патча
+          FILES=(
+            "src/api/environment/environment.h"
+            "src/api/environment/environment_factory.cc"
+            "src/api/environment/environment_factory.h"
+            "src/api/rtc_event_log/rtc_event_log_factory_interface.h"
+            "src/modules/audio_processing/include/audio_processing.h"
+            "src/api/task_queue/pending_task_safety_flag.h"
+            "src/api/transport/field_trial_based_config.h"
+            "src/call/audio_state.h"
+            "src/call/rtp_transport_controller_send_factory_interface.h"
+          )
+          
+          for FILE in "${FILES[@]}"; do
+            if [ -f "$FILE" ]; then
+              echo "Патчим файл: $FILE"
+              /usr/bin/perl -0777 -i -pe 's/absl::\s*Nonnull\s*<\s*([^>]+)\s*>/\1/g;s/absl::\s*Nullable\s*<\s*([^>]+)\s*>/\1/g' "$FILE"
+            else
+              echo "Файл не найден: $FILE - пропускаем"
+            fi
+          done
+
+          # Автопоиск и патч всех остальных файлов
+          echo "Автопоиск файлов с absl::Nonnull/Nullable..."
+          find . \( -name "*.h" -o -name "*.hh" -o -name "*.hpp" -o -name "*.cc" -o -name "*.cpp" -o -name "*.c" \) -type f | \
+          while read file; do
+            if grep -q "absl::Nonnull\|absl::Nullable" "$file" 2>/dev/null; then
+              echo "Найден файл для патча: $file"
+              /usr/bin/perl -0777 -i -pe 's/absl::\s*Nonnull\s*<\s*([^>]+)\s*>/\1/g;s/absl::\s*Nullable\s*<\s*([^>]+)\s*>/\1/g' "$file"
+            fi
+          done
 
           # Сборка tg_owt
           cmake -B build -GNinja . \
